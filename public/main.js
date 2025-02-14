@@ -71,6 +71,15 @@ class AudioConference {
         this.setupWebRTCSignaling();
     }
 
+     // 🔹 ADD THIS FUNCTION BELOW ⬇️
+    debounce(func, wait) {
+        let timeout;
+        return (...args) => {
+            clearTimeout(timeout);
+            timeout = setTimeout(() => func.apply(this, args), wait);
+        };
+    }
+
     setupWebRTCSignaling() {
         this.socket.on('offer', async ({ offerer, description }) => {
             try {
