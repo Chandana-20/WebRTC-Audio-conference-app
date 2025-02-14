@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Conference</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="styles.css" rel="stylesheet">
+</head>
+<body class="bg-gray-100">
+    <div class="min-h-screen flex flex-col">
+        <header class="bg-blue-600 text-white p-4">
+            <h1 class="text-2xl text-center">Audio Conference</h1>
+        </header>
+
+        <main class="flex-1 container mx-auto p-4">
+            <div class="max-w-2xl mx-auto">
+                <!-- Room Controls -->
+                <div class="bg-white rounded-lg p-4 mb-4 shadow">
+                    <div class="flex gap-4 mb-4">
+                        <input type="text" id="roomId" 
+                               class="flex-1 p-2 border rounded" 
+                               placeholder="Enter Room ID">
+                        <button id="joinBtn" 
+                                class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600">
+                            Join Room
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Audio Controls -->
+                <div class="bg-white rounded-lg p-4 mb-4 shadow">
+                    <div class="flex justify-center gap-4">
+                        <button id="muteBtn" 
+                                class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600" 
+                                disabled>
+                            Mute
+                        </button>
+                        <button id="leaveBtn" 
+                                class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600" 
+                                disabled>
+                            Leave Room
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Participants List -->
+                <div class="bg-white rounded-lg p-4 shadow">
+                    <h2 class="text-xl mb-4">Participants</h2>
+                    <div id="participants" class="space-y-2">
+                        <!-- Participants will be added here -->
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="main.js"></script>
+</body>
+</html>

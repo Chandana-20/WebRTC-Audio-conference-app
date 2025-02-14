@@ -1,0 +1,12 @@
+/* Additional custom styles if needed */
+.participant-active {
+    background-color: #e5e7eb;
+}
+
+.audio-indicator {
+    transition: background-color 0.3s ease;
+}
+
+.audio-indicator.speaking {
+    background-color: #10B981;
+}
