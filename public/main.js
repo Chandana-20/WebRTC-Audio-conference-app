@@ -148,13 +148,19 @@ class AudioConference {
             try {
                 const peerConnection = this.peers.get(answerer);
                 if (peerConnection) {
-                    await peerConnection.setRemoteDescription(new RTCSessionDescription(description));
+                    if (peerConnection.signalingState === "have-local-offer") {
+                        await peerConnection.setRemoteDescription(new RTCSessionDescription(description));
+                        console.log("Remote description set successfully for:", answerer);
+                    } else {
+                        console.warn("Skipping setRemoteDescription for", answerer, "invalid state:", peerConnection.signalingState);
+                    }
                 }
             } catch (error) {
                 console.error('Error handling answer:', error);
                 this.handleError('Failed to process connection answer');
             }
         });
+        
 
         this.socket.on('ice-candidate', async ({ sender, candidate }) => {
             try {

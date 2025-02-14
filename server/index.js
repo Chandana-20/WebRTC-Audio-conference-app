@@ -97,6 +97,11 @@ io.on('connection', (socket) => {
         });
     });
 
+    socket.on("answer", (answer) => {
+        console.log("Received answer:", answer);
+    });
+    
+
     socket.on('ice-candidate', ({ target, candidate }) => {
         io.to(target).emit('ice-candidate', {
             sender: socket.id,
