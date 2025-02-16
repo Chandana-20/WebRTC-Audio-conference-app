@@ -1,168 +1,253 @@
+// server.js
 const express = require('express');
 const http = require('http');
 const path = require('path');
 const { Server } = require("socket.io");
+const mediasoup = require('mediasoup');
 
 const app = express();
 const server = http.createServer(app);
 
-// Configure CORS for production
-const io = new Server(server, {
-    cors: {
-        origin: process.env.NODE_ENV === 'production' 
-            ? "https://webrtc-audio-conference-call.onrender.com"  
-            : "http://localhost:3000",
-        methods: ["GET", "POST"]
-    }
-});
+// In your server initialization:
+async function initializeMediaSoup() {
+  const worker = await mediasoup.createWorker({
+    logLevel: 'warn',
+    rtcMinPort: 10000,
+    rtcMaxPort: 10100
+  });
 
-// Security middleware
-app.use((req, res, next) => {
+  const router = await worker.createRouter({
+    mediaCodecs: [
+      {
+        kind: 'audio',
+        mimeType: 'audio/opus',
+        clockRate: 48000,
+        channels: 2
+      }
+    ]
+  });
+
+  return router;
+}
+
+// Store for our app state
+const state = {
+  worker: null,
+  router: null,
+  rooms: new Map(), // roomId -> { transports, producers, consumers }
+  peers: new Map()  // socketId -> { roomId, transports, producers, consumers }
+};
+
+// Initialize MediaSoup worker
+async function initializeMediaSoup() {
+  state.worker = await mediasoup.createWorker({
+    logLevel: 'warn',
+    rtcMinPort: mediasoupSettings.worker.rtcMinPort,
+    rtcMaxPort: mediasoupSettings.worker.rtcMaxPort
+  });
+
+  state.router = await state.worker.createRouter({
+    mediaCodecs: mediasoupSettings.router.mediaCodecs
+  });
+
+  console.log('📡 MediaSoup worker and router initialized');
+}
+
+// Initialize server
+async function initializeServer() {
+  await initializeMediaSoup();
+
+  // Basic security headers
+  app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('X-XSS-Protection', '1; mode=block');
-    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     next();
-});
+  });
 
-// Serve static files
-app.use(express.static(path.join(__dirname, '../public')));
+  // Serve static files
+  app.use(express.static(path.join(__dirname, 'public')));
 
-// Health check
-app.get('/health', (req, res) => res.status(200).send('OK'));
+  // Socket.io setup with CORS
+  const io = new Server(server, {
+    cors: {
+      origin: process.env.NODE_ENV === 'production' 
+        ? "https://webrtc-audio-conference-app.onrender.com"
+        : "http://localhost:3000"
+    }
+  });
 
-// Rate limiting
-const connections = new Map();
-const MAX_CONNECTIONS_PER_IP = 50;
-const RATE_LIMIT_WINDOW = 60000; 
+  // Handle WebSocket connections
+  io.on('connection', handleConnection);
 
-app.use((req, res, next) => {
-    const ip = req.ip;
-    const now = Date.now();
+  // Start server
+  const PORT = process.env.PORT || 3000;
+  server.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+  });
+}
 
-    if (!connections.has(ip)) connections.set(ip, []);
+// Handle new WebSocket connections
+async function handleConnection(socket) {
+  console.log(`🔗 New connection: ${socket.id}`);
+
+  // Initialize peer state
+  state.peers.set(socket.id, {
+    roomId: null,
+    transports: new Map(),
+    producers: new Map(),
+    consumers: new Map()
+  });
+
+  // Handle join room request
+  socket.on('joinRoom', async ({ roomId }, callback) => {
+    try {
+      const peer = state.peers.get(socket.id);
+      peer.roomId = roomId;
+
+      // Create room if it doesn't exist
+      if (!state.rooms.has(roomId)) {
+        state.rooms.set(roomId, {
+          transports: new Map(),
+          producers: new Map(),
+          consumers: new Map()
+        });
+      }
+
+      // Get router RTP capabilities
+      const routerRtpCapabilities = state.router.rtpCapabilities;
+      
+      callback({ rtpCapabilities: routerRtpCapabilities });
+      
+      // Notify others in room
+      socket.join(roomId);
+      socket.to(roomId).emit('peerJoined', { peerId: socket.id });
+    } catch (error) {
+      console.error('Error joining room:', error);
+      callback({ error: error.message });
+    }
+  });
+
+  // Handle transport creation
+  socket.on('createTransport', async ({ direction }, callback) => {
+    try {
+      const transport = await createWebRtcTransport();
+      const peer = state.peers.get(socket.id);
+      
+      peer.transports.set(direction, transport);
+      
+      callback({
+        params: {
+          id: transport.id,
+          iceParameters: transport.iceParameters,
+          iceCandidates: transport.iceCandidates,
+          dtlsParameters: transport.dtlsParameters
+        }
+      });
+    } catch (error) {
+      callback({ error: error.message });
+    }
+  });
+
+  // Handle transport connection
+  socket.on('connectTransport', async ({ direction, dtlsParameters }, callback) => {
+    try {
+      const peer = state.peers.get(socket.id);
+      const transport = peer.transports.get(direction);
+      
+      await transport.connect({ dtlsParameters });
+      callback({ success: true });
+    } catch (error) {
+      callback({ error: error.message });
+    }
+  });
+
+  // Handle producer creation (publishing audio)
+  socket.on('produce', async ({ transportId, kind, rtpParameters }, callback) => {
+    try {
+      const peer = state.peers.get(socket.id);
+      const transport = peer.transports.get('send');
+      
+      const producer = await transport.produce({
+        kind,
+        rtpParameters
+      });
+
+      peer.producers.set(producer.id, producer);
+      
+      // Notify others to consume this new producer
+      socket.to(peer.roomId).emit('newProducer', {
+        producerId: producer.id,
+        producerPeerId: socket.id
+      });
+
+      callback({ id: producer.id });
+    } catch (error) {
+      callback({ error: error.message });
+    }
+  });
+
+  // Handle consumer creation (receiving audio)
+  socket.on('consume', async ({ producerId }, callback) => {
+    try {
+      const peer = state.peers.get(socket.id);
+      const transport = peer.transports.get('recv');
+      
+      const consumer = await transport.consume({
+        producerId,
+        rtpCapabilities: state.router.rtpCapabilities
+      });
+
+      peer.consumers.set(consumer.id, consumer);
+
+      callback({
+        id: consumer.id,
+        producerId: producerId,
+        kind: consumer.kind,
+        rtpParameters: consumer.rtpParameters
+      });
+    } catch (error) {
+      callback({ error: error.message });
+    }
+  });
+
+  // Handle disconnection
+  socket.on('disconnect', () => {
+    console.log(`🔌 Peer disconnected: ${socket.id}`);
+    const peer = state.peers.get(socket.id);
     
-    const reqs = connections.get(ip).filter(time => now - time < RATE_LIMIT_WINDOW);
-
-    if (reqs.length >= MAX_CONNECTIONS_PER_IP) {
-        return res.status(429).send('Too many requests');
+    if (peer) {
+      // Clean up peer's resources
+      peer.producers.forEach(producer => producer.close());
+      peer.consumers.forEach(consumer => consumer.close());
+      peer.transports.forEach(transport => transport.close());
+      
+      // Notify others in the room
+      if (peer.roomId) {
+        socket.to(peer.roomId).emit('peerLeft', { peerId: socket.id });
+      }
+      
+      state.peers.delete(socket.id);
     }
+  });
+}
 
-    reqs.push(now);
-    connections.set(ip, reqs);
-    next();
+// Helper function to create WebRTC transport
+async function createWebRtcTransport() {
+  return await state.router.createWebRtcTransport({
+    listenIps: [
+      {
+        ip: process.env.LISTEN_IP || '0.0.0.0',
+        announcedIp: process.env.ANNOUNCED_IP || '127.0.0.1'
+      }
+    ],
+    enableUdp: true,
+    enableTcp: true,
+    preferUdp: true
+  });
+}
+
+// Start the server
+initializeServer().catch(error => {
+  console.error('Failed to initialize server:', error);
+  process.exit(1);
 });
-
-// Store room information
-const rooms = new Map();
-
-io.on('connection', (socket) => {
-    console.log(`🔗 User connected: ${socket.id}`);
-    
-    let currentRoom = null;
-
-    socket.on('join-room', (roomId) => {
-        try {
-            const safeRoomId = roomId.replace(/[^a-zA-Z0-9-]/g, '');
-
-            if (currentRoom) handleLeaveRoom();
-            
-            currentRoom = safeRoomId;
-            socket.join(safeRoomId);
-            
-            if (!rooms.has(safeRoomId)) rooms.set(safeRoomId, new Set());
-            rooms.get(safeRoomId).add(socket.id);
-
-            // Send existing users list
-            const users = Array.from(rooms.get(safeRoomId));
-            socket.emit('existing-users', users);
-            
-            // Notify others
-            socket.to(safeRoomId).emit('user-connected', socket.id);
-
-            console.log(`✅ User ${socket.id} joined room ${safeRoomId}`);
-        } catch (error) {
-            console.error('Error in join-room:', error);
-            socket.emit('error', 'Failed to join room');
-        }
-    });
-
-    socket.on('leave-room', handleLeaveRoom);
-
-    function handleLeaveRoom() {
-        if (currentRoom && rooms.has(currentRoom)) {
-            const roomUsers = rooms.get(currentRoom);
-            roomUsers.delete(socket.id);
-            
-            if (roomUsers.size === 0) rooms.delete(currentRoom);
-            
-            socket.to(currentRoom).emit('user-disconnected', socket.id);
-            socket.leave(currentRoom);
-
-            console.log(`❌ User ${socket.id} left room ${currentRoom}`);
-            currentRoom = null;
-        }
-    }
-
-    // WebRTC signaling
-
-    socket.on('offer', ({ target, description }) => {
-        if (!isValidTarget(target)) return;
-
-        console.log(`📡 Offer sent from ${socket.id} to ${target}`);
-        io.to(target).emit('offer', { offerer: socket.id, description });
-    });
-
-    socket.on('answer', ({ target, description }) => {
-        if (!isValidTarget(target)) return;
-
-        console.log(`📡 Answer sent from ${socket.id} to ${target}`);
-        io.to(target).emit('answer', { answerer: socket.id, description });
-    });
-
-    socket.on('ice-candidate', ({ target, candidate }) => {
-        if (!isValidTarget(target)) return;
-
-        console.log(`❄️ ICE candidate from ${socket.id} to ${target}`);
-        io.to(target).emit('ice-candidate', { sender: socket.id, candidate });
-    });
-
-    function isValidTarget(target) {
-        if (!currentRoom || !rooms.has(currentRoom)) {
-            console.warn(`⚠️ Invalid room state for user ${socket.id}`);
-            return false;
-        }
-        const roomUsers = rooms.get(currentRoom);
-        if (!roomUsers.has(target)) {
-            console.warn(`⚠️ Target ${target} not in room ${currentRoom}`);
-            return false;
-        }
-        return true;
-    }
-
-    socket.on('disconnect', () => {
-        console.log(`🔌 User disconnected: ${socket.id}`);
-        handleLeaveRoom();
-    });
-});
-
-// Cleanup old rate limit entries
-setInterval(() => {
-    const now = Date.now();
-    for (const [ip, reqs] of connections.entries()) {
-        const recentReqs = reqs.filter(time => now - time < RATE_LIMIT_WINDOW);
-        if (recentReqs.length === 0) {
-            connections.delete(ip);
-        } else {
-            connections.set(ip, recentReqs);
-        }
-    }
-}, RATE_LIMIT_WINDOW);
-
-// Error handling
-process.on('uncaughtException', (error) => console.error('🚨 Uncaught Exception:', error));
-process.on('unhandledRejection', (reason, promise) => console.error('🚨 Unhandled Rejection:', reason));
-
-// Start server
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
