@@ -1,7 +1,7 @@
 {
   "name": "ion-audio-conference",
   "version": "1.0.0",
-  "description": "WebRTC Audio Conference with MediaSoup SFU",
+  "description": "WebRTC Audio Conference",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
@@ -15,8 +15,5 @@
   },
   "devDependencies": {
     "nodemon": "^2.0.15"
-  },
-  "engines": {
-    "node": ">=16.0.0"
   }
 }
